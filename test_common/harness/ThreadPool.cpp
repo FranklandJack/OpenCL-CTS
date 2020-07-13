@@ -49,7 +49,6 @@ void ThreadPool_Exit(void);
 #if defined (__MINGW32__)
     // Mutex for implementing super heavy atomic operations if you don't have GCC or MSVC
     CRITICAL_SECTION     gAtomicLock;
-#elif defined( __GNUC__ ) || defined( _MSC_VER)
 #else
     pthread_mutex_t     gAtomicLock;
 #endif
@@ -64,10 +63,6 @@ cl_int ThreadPool_AtomicAdd( volatile cl_int *a, cl_int b )
     *a = old + b;
     LeaveCriticalSection(&gAtomicLock);
     return old;
-#elif defined( __GNUC__ )
-    // GCC extension: http://gcc.gnu.org/onlinedocs/gcc/Atomic-Builtins.html#Atomic-Builtins
-    return __sync_fetch_and_add( a, b );
-    // do we need __sync_synchronize() here, too?  GCC docs are unclear whether __sync_fetch_and_add does a synchronize
 #elif defined( _MSC_VER )
     return (cl_int) _InterlockedExchangeAdd( (volatile LONG*) a, (LONG) b );
 #else
@@ -622,7 +617,9 @@ static BOOL CALLBACK _ThreadPool_Init(_PINIT_ONCE InitOnce, PVOID Parameter, PVO
 void ThreadPool_Exit(void)
 {
     int err, count;
+    pthread_mutex_lock(&gAtomicLock);
     gRunCount = CL_INT_MAX;
+    pthread_mutex_unlock(&gAtomicLock);
 
 #if defined( __GNUC__ )
     // GCC extension: http://gcc.gnu.org/onlinedocs/gcc/Atomic-Builtins.html#Atomic-Builtins
@@ -632,9 +629,13 @@ void ThreadPool_Exit(void)
 #else
     #warning   If this is a weakly ordered memory system, please add a memory barrier here to force this and everything else to memory before we proceed
 #endif
+    int tmp;
+    pthread_mutex_lock(&gAtomicLock);
+    tmp = gThreadCount;
+    pthread_mutex_unlock(&gAtomicLock);
 
     // spin waiting for threads to die
-    for (count = 0; 0 != gThreadCount && count < 1000; count++)
+    for (count = 0; 0 != tmp && count < 1000; count++)
     {
 #if defined( _WIN32 )
         _WakeAllConditionVariable( cond_var );
@@ -647,10 +648,13 @@ void ThreadPool_Exit(void)
         }
         usleep(1000);
 #endif // !_WIN32
+    pthread_mutex_lock(&gAtomicLock);
+    tmp = gThreadCount;
+    pthread_mutex_unlock(&gAtomicLock);
     }
 
-    if( gThreadCount )
-        log_error( "Error: Thread pool timed out after 1 second with %d threads still active.\n", gThreadCount );
+    if( tmp )
+        log_error( "Error: Thread pool timed out after 1 second with %d threads still active.\n", tmp );
     else
         log_info( "Thread pool exited in a orderly fashion.\n" );
 }
